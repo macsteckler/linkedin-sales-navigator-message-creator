@@ -10,6 +10,8 @@ from hubspot.crm.contacts.models import SimplePublicObjectInput
 from hubspot.crm.objects.notes import SimplePublicObjectInputForCreate as NotesSimplePublicObjectInputForCreate
 from hubspot.crm.objects.notes.models import SimplePublicObjectInput as NotesSimplePublicObjectInput
 import requests
+from supabase import create_client, Client
+import json
 
 # Set page config
 st.set_page_config(
@@ -18,71 +20,104 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state for prompts if not exists
-def initialize_prompts():
-    """Initialize prompts in session state if they don't exist"""
-    if "prompts" not in st.session_state:
-        st.session_state.prompts = {
-            "Cold Outreach": {
-                "system_prompt": "You are a sales expert creating personalized cold outreach messages for LinkedIn Sales Navigator. Create engaging, professional messages that grab attention.",
-                "user_prompt": """Create a LinkedIn message for:
-Name: {name}
-Title: {title}
-Company: {company}
+# Initialize Supabase client
+@st.cache_resource
+def init_supabase():
+    """Initialize and cache Supabase client"""
+    try:
+        url = st.secrets.get("supabase_url", "")
+        key = st.secrets.get("supabase_key", "")
+        if not url or not key:
+            st.error("Supabase credentials not found in secrets")
+            return None
+        return create_client(url, key)
+    except Exception as e:
+        st.error(f"Supabase connection error: {str(e)}")
+        return None
 
-Generate:
-1. A compelling subject line (5-8 words)
-2. A personalized message body (2-3 sentences, professional but friendly)
-
-Focus on: Building initial connection and sparking interest.""",
-                "model": "gpt-3.5-turbo"
-            },
-            
-            "Follow-up": {
-                "system_prompt": "You are a sales expert creating follow-up messages for LinkedIn Sales Navigator. Create messages that re-engage prospects professionally.",
-                "user_prompt": """Create a LinkedIn follow-up message for:
-Name: {name}
-Title: {title}
-Company: {company}
-
-Generate:
-1. A compelling subject line (5-8 words)
-2. A follow-up message body (2-3 sentences, acknowledging previous contact)
-
-Focus on: Re-engaging and providing value.""",
-                "model": "gpt-3.5-turbo"
-            },
-            
-            "Product Demo": {
-                "system_prompt": "You are a sales expert creating product demonstration invitation messages for LinkedIn Sales Navigator. Create messages that showcase value proposition.",
-                "user_prompt": """Create a LinkedIn product demo invitation for:
-Name: {name}
-Title: {title}
-Company: {company}
-
-Generate:
-1. A compelling subject line (5-8 words)
-2. A demo invitation message body (2-3 sentences, highlighting benefits)
-
-Focus on: Demonstrating product value and scheduling demo.""",
-                "model": "gpt-3.5-turbo"
-            },
-            
-            "Partnership": {
-                "system_prompt": "You are a sales expert creating partnership opportunity messages for LinkedIn Sales Navigator. Create messages that propose mutual business benefits.",
-                "user_prompt": """Create a LinkedIn partnership message for:
-Name: {name}
-Title: {title}
-Company: {company}
-
-Generate:
-1. A compelling subject line (5-8 words)
-2. A partnership proposal message body (2-3 sentences, highlighting mutual benefits)
-
-Focus on: Proposing strategic partnership opportunities.""",
-                "model": "gpt-3.5-turbo"
+# Supabase prompt management functions
+def load_prompts_from_supabase() -> Dict[str, Dict]:
+    """Load all active prompts from Supabase"""
+    supabase = init_supabase()
+    if not supabase:
+        return {}
+    
+    try:
+        response = supabase.table('evergreen_outreach_prompts').select('*').eq('is_active', True).execute()
+        prompts = {}
+        for prompt in response.data:
+            prompts[prompt['name']] = {
+                'id': prompt['id'],
+                'system_prompt': prompt['system_prompt'],
+                'user_prompt': prompt['user_prompt'],
+                'model': prompt['model']
             }
+        return prompts
+    except Exception as e:
+        st.error(f"Error loading prompts from Supabase: {str(e)}")
+        return {}
+
+def save_prompt_to_supabase(name: str, system_prompt: str, user_prompt: str, model: str) -> bool:
+    """Save a new prompt to Supabase"""
+    supabase = init_supabase()
+    if not supabase:
+        return False
+    
+    try:
+        data = {
+            'name': name,
+            'system_prompt': system_prompt,
+            'user_prompt': user_prompt,
+            'model': model,
+            'created_by': 'user'
         }
+        response = supabase.table('evergreen_outreach_prompts').insert(data).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        st.error(f"Error saving prompt to Supabase: {str(e)}")
+        return False
+
+def update_prompt_in_supabase(prompt_id: str, name: str, system_prompt: str, user_prompt: str, model: str) -> bool:
+    """Update an existing prompt in Supabase"""
+    supabase = init_supabase()
+    if not supabase:
+        return False
+    
+    try:
+        data = {
+            'name': name,
+            'system_prompt': system_prompt,
+            'user_prompt': user_prompt,
+            'model': model
+        }
+        response = supabase.table('evergreen_outreach_prompts').update(data).eq('id', prompt_id).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        st.error(f"Error updating prompt in Supabase: {str(e)}")
+        return False
+
+def delete_prompt_from_supabase(prompt_id: str) -> bool:
+    """Soft delete a prompt in Supabase (set is_active to False)"""
+    supabase = init_supabase()
+    if not supabase:
+        return False
+    
+    try:
+        response = supabase.table('evergreen_outreach_prompts').update({'is_active': False}).eq('id', prompt_id).execute()
+        return len(response.data) > 0
+    except Exception as e:
+        st.error(f"Error deleting prompt from Supabase: {str(e)}")
+        return False
+
+# Initialize session state for prompts cache
+def initialize_prompts():
+    """Load prompts from Supabase and cache in session state"""
+    if "prompts" not in st.session_state:
+        st.session_state.prompts = load_prompts_from_supabase()
+        if st.session_state.prompts:
+            st.success(f"✅ Loaded {len(st.session_state.prompts)} prompts from database")
+        else:
+            st.warning("⚠️ No prompts found in database - check Supabase connection")
 
 # Initialize prompts on app start
 initialize_prompts()
@@ -795,14 +830,10 @@ def main():
                 st.session_state.show_add_prompt = True
         
         with col2:
-            if st.button("🔄 Reset to Defaults", type="secondary"):
-                if st.button("⚠️ Confirm Reset", key="confirm_reset"):
-                    # Clear session state to reinitialize with defaults
-                    if "prompts" in st.session_state:
-                        del st.session_state.prompts
-                    initialize_prompts()
-                    st.success("✅ Prompts reset to defaults!")
-                    st.rerun()
+            if st.button("🔄 Refresh from Database", type="secondary"):
+                st.session_state.prompts = load_prompts_from_supabase()
+                st.success("✅ Prompts refreshed from database!")
+                st.rerun()
         
         # Add new prompt form
         if st.session_state.get("show_add_prompt", False):
@@ -824,14 +855,15 @@ def main():
                 if add_submitted:
                     if new_prompt_name and new_system_prompt and new_user_prompt:
                         if new_prompt_name not in st.session_state.prompts:
-                            st.session_state.prompts[new_prompt_name] = {
-                                "system_prompt": new_system_prompt,
-                                "user_prompt": new_user_prompt,
-                                "model": new_model
-                            }
-                            st.success(f"✅ Added new prompt: {new_prompt_name}")
-                            st.session_state.show_add_prompt = False
-                            st.rerun()
+                            with st.spinner("Saving prompt to database..."):
+                                success = save_prompt_to_supabase(new_prompt_name, new_system_prompt, new_user_prompt, new_model)
+                                if success:
+                                    st.success(f"✅ Added new prompt: {new_prompt_name}")
+                                    st.session_state.prompts = load_prompts_from_supabase()  # Refresh cache
+                                    st.session_state.show_add_prompt = False
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to save prompt to database")
                         else:
                             st.error("❌ Prompt name already exists!")
                     else:
@@ -847,7 +879,7 @@ def main():
         
         # Check if prompts exist and display them
         if not st.session_state.prompts:
-            st.warning("⚠️ No prompts found! Click 'Reset to Defaults' to restore default prompts.")
+            st.warning("⚠️ No prompts found! Check your Supabase connection or add new prompts.")
         else:
             for prompt_name in list(st.session_state.prompts.keys()):
                 with st.expander(f"✏️ {prompt_name}", expanded=False):
@@ -907,29 +939,36 @@ def main():
                             elif new_prompt_name != prompt_name and new_prompt_name in st.session_state.prompts:
                                 st.error(f"❌ Prompt name '{new_prompt_name}' already exists!")
                             else:
-                                # Update prompt data
-                                updated_prompt = {
-                                    "system_prompt": system_prompt,
-                                    "user_prompt": user_prompt,
-                                    "model": selected_model
-                                }
-                                
-                                # If name changed, create new entry and delete old one
-                                if new_prompt_name != prompt_name:
-                                    st.session_state.prompts[new_prompt_name] = updated_prompt
-                                    del st.session_state.prompts[prompt_name]
-                                    st.success(f"✅ Renamed '{prompt_name}' to '{new_prompt_name}' and updated!")
-                                else:
-                                    st.session_state.prompts[prompt_name] = updated_prompt
-                                    st.success(f"✅ Updated {prompt_name}")
-                                
-                                st.rerun()
+                                with st.spinner("Updating prompt in database..."):
+                                    # Update prompt in Supabase
+                                    prompt_id = prompt_data.get('id')
+                                    success = update_prompt_in_supabase(prompt_id, new_prompt_name, system_prompt, user_prompt, selected_model)
+                                    
+                                    if success:
+                                        if new_prompt_name != prompt_name:
+                                            st.success(f"✅ Renamed '{prompt_name}' to '{new_prompt_name}' and updated!")
+                                        else:
+                                            st.success(f"✅ Updated {prompt_name}")
+                                        
+                                        # Refresh cache
+                                        st.session_state.prompts = load_prompts_from_supabase()
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Failed to update prompt in database")
                         
                         if delete_prompt:
                             if len(st.session_state.prompts) > 1:  # Keep at least one prompt
-                                del st.session_state.prompts[prompt_name]
-                                st.success(f"✅ Deleted {prompt_name}")
-                                st.rerun()
+                                with st.spinner("Deleting prompt from database..."):
+                                    prompt_id = prompt_data.get('id')
+                                    success = delete_prompt_from_supabase(prompt_id)
+                                    
+                                    if success:
+                                        st.success(f"✅ Deleted {prompt_name}")
+                                        # Refresh cache
+                                        st.session_state.prompts = load_prompts_from_supabase()
+                                        st.rerun()
+                                    else:
+                                        st.error("❌ Failed to delete prompt from database")
                             else:
                                 st.error("❌ Cannot delete the last prompt!")
 
